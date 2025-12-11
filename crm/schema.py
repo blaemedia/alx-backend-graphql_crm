@@ -1,266 +1,308 @@
-# tests/test_graphql.py
+# tests/test_schema.py
 from django.test import TestCase
-from graphene.test import Client
 from unittest.mock import patch, MagicMock
-import json
 from decimal import Decimal
+import graphene
+from graphql import GraphQLError
 
-from your_app.schema import schema
 from your_app.models import Customer, Product, Order
+from your_app.schema import CreateCustomer, CreateProduct, CreateOrder
 
 
-class TestGraphQLMutations(TestCase):
+class TestCreateCustomerMutation(TestCase):
+    """Test the CreateCustomer mutation"""
+    
+    def test_create_customer_success(self):
+        """Test successful customer creation"""
+        # Get initial count
+        initial_count = Customer.objects.count()
+        
+        # Execute mutation
+        mutation = CreateCustomer()
+        result = mutation.mutate(
+            None,  # root
+            None,  # info
+            MagicMock(
+                name="Test Customer",
+                email="test@example.com",
+                phone="+1234567890"
+            )
+        )
+        
+        # Verify customer was created
+        self.assertEqual(Customer.objects.count(), initial_count + 1)
+        self.assertEqual(result.customer.name, "Test Customer")
+        self.assertEqual(result.customer.email, "test@example.com")
+        self.assertEqual(result.message, "Customer created successfully")
+    
+    def test_create_customer_duplicate_email(self):
+        """Test customer creation fails with duplicate email"""
+        # Create a customer first
+        Customer.objects.create(
+            name="Existing Customer",
+            email="existing@example.com",
+            phone="+1234567890"
+        )
+        
+        # Try to create another customer with same email
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateCustomer()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    name="New Customer",
+                    email="existing@example.com",  # Same email!
+                    phone="+0987654321"
+                )
+            )
+        
+        # Verify error
+        self.assertIn("Email already exists", str(context.exception))
+    
+    def test_create_customer_invalid_phone(self):
+        """Test customer creation fails with invalid phone"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateCustomer()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    name="Test Customer",
+                    email="test@example.com",
+                    phone="invalid-phone"
+                )
+            )
+        
+        # Verify error
+        self.assertIn("Invalid phone format", str(context.exception))
+
+
+class TestCreateProductMutation(TestCase):
+    """Test the CreateProduct mutation"""
+    
+    def test_create_product_success(self):
+        """Test successful product creation"""
+        # Get initial count
+        initial_count = Product.objects.count()
+        
+        # Execute mutation
+        mutation = CreateProduct()
+        result = mutation.mutate(
+            None,  # root
+            None,  # info
+            MagicMock(
+                name="Test Product",
+                price=Decimal("29.99"),
+                stock=100
+            )
+        )
+        
+        # Verify product was created
+        self.assertEqual(Product.objects.count(), initial_count + 1)
+        self.assertEqual(result.product.name, "Test Product")
+        self.assertEqual(result.product.price, Decimal("29.99"))
+        self.assertEqual(result.product.stock, 100)
+    
+    def test_create_product_invalid_price(self):
+        """Test product creation fails with negative price"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateProduct()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    name="Test Product",
+                    price=Decimal("-10.00"),  # Negative price!
+                    stock=100
+                )
+            )
+        
+        # Verify error
+        self.assertIn("Price must be a positive number", str(context.exception))
+    
+    def test_create_product_negative_stock(self):
+        """Test product creation fails with negative stock"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateProduct()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    name="Test Product",
+                    price=Decimal("10.00"),
+                    stock=-5  # Negative stock!
+                )
+            )
+        
+        # Verify error
+        self.assertIn("Stock cannot be negative", str(context.exception))
+
+
+class TestCreateOrderMutation(TestCase):
+    """Test the CreateOrder mutation"""
+    
     def setUp(self):
-        self.client = Client(schema)
-        self.test_customer = Customer.objects.create(
+        # Create test data
+        self.customer = Customer.objects.create(
             name="Test Customer",
             email="customer@example.com",
             phone="+1234567890"
         )
-        self.test_product = Product.objects.create(
-            name="Test Product",
-            price=Decimal("29.99"),
+        self.product1 = Product.objects.create(
+            name="Product 1",
+            price=Decimal("10.00"),
             stock=100
         )
-    
-    def test_create_customer_mutation_save_called(self):
-        """Test GraphQL mutation calls save()"""
-        with patch.object(Customer, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    createCustomer(input: {
-                        name: "John Doe",
-                        email: "john@example.com",
-                        phone: "+1234567890"
-                    }) {
-                        customer {
-                            id
-                            name
-                            email
-                        }
-                        message
-                    }
-                }
-            """
-            
-            # Execute GraphQL mutation
-            result = self.client.execute(mutation)
-            
-            # Check if save was called
-            self.assertTrue(mock_save.called)
-            
-            # Verify the response
-            self.assertIsNotNone(result.get('data'))
-            self.assertIsNotNone(result['data']['createCustomer']['customer'])
-    
-    def test_bulk_create_customers_save_called(self):
-        """Test bulk create mutation calls save()"""
-        with patch.object(Customer, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    bulkCreateCustomers(inputs: [
-                        {
-                            name: "Customer 1",
-                            email: "customer1@example.com"
-                        },
-                        {
-                            name: "Customer 2",
-                            email: "customer2@example.com",
-                            phone: "+1234567890"
-                        }
-                    ]) {
-                        customers {
-                            id
-                            name
-                        }
-                        errors
-                    }
-                }
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # Should call save twice (once for each customer)
-            self.assertEqual(mock_save.call_count, 2)
-    
-    def test_create_product_mutation(self):
-        """Test product creation calls save()"""
-        with patch.object(Product, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    createProduct(input: {
-                        name: "Test Product",
-                        price: 29.99,
-                        stock: 100
-                    }) {
-                        product {
-                            id
-                            name
-                            price
-                        }
-                    }
-                }
-            """
-            
-            result = self.client.execute(mutation)
-            self.assertTrue(mock_save.called)
-    
-    def test_create_order_mutation(self):
-        """Test order creation calls save() and validates properly"""
-        with patch.object(Order, 'save') as mock_save:
-            # Prepare mutation with existing customer and product IDs
-            mutation = f"""
-                mutation {{
-                    createOrder(input: {{
-                        customerId: "{self.test_customer.id}",
-                        productIds: ["{self.test_product.id}"],
-                        orderDate: "2024-01-15T10:00:00Z"
-                    }}) {{
-                        order {{
-                            id
-                            totalAmount
-                            orderDate
-                            customer {{
-                                id
-                                name
-                            }}
-                            products {{
-                                id
-                                name
-                            }}
-                        }}
-                    }}
-                }}
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # Check if save was called on Order
-            self.assertTrue(mock_save.called)
-            
-            # Verify response structure
-            self.assertIsNotNone(result.get('data'))
-            self.assertIsNotNone(result['data']['createOrder']['order'])
-            
-            # Verify total amount calculation
-            order_data = result['data']['createOrder']['order']
-            self.assertEqual(order_data['totalAmount'], "29.99")
-    
-    def test_create_order_with_multiple_products(self):
-        """Test order creation with multiple products calls save()"""
-        # Create additional product
-        product2 = Product.objects.create(
+        self.product2 = Product.objects.create(
             name="Product 2",
-            price=Decimal("15.50"),
+            price=Decimal("20.00"),
             stock=50
         )
+    
+    def test_create_order_success(self):
+        """Test successful order creation"""
+        # Get initial count
+        initial_count = Order.objects.count()
         
-        with patch.object(Order, 'save') as mock_save:
-            mutation = f"""
-                mutation {{
-                    createOrder(input: {{
-                        customerId: "{self.test_customer.id}",
-                        productIds: ["{self.test_product.id}", "{product2.id}"],
-                        orderDate: "2024-01-15T10:00:00Z"
-                    }}) {{
-                        order {{
-                            id
-                            totalAmount
-                            products {{
-                                id
-                                name
-                            }}
-                        }}
-                    }}
-                }}
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # Check if save was called
-            self.assertTrue(mock_save.called)
-            
-            # Verify total amount is sum of both products
-            order_data = result['data']['createOrder']['order']
-            self.assertEqual(order_data['totalAmount'], "45.49")  # 29.99 + 15.50
+        # Execute mutation
+        mutation = CreateOrder()
+        result = mutation.mutate(
+            None,  # root
+            None,  # info
+            MagicMock(
+                customer_id=str(self.customer.id),
+                product_ids=[str(self.product1.id), str(self.product2.id)],
+                order_date=None  # Will use datetime.now()
+            )
+        )
+        
+        # Verify order was created
+        self.assertEqual(Order.objects.count(), initial_count + 1)
+        self.assertEqual(result.order.customer.id, self.customer.id)
+        self.assertEqual(result.order.total_amount, Decimal("30.00"))  # 10 + 20
+        
+        # Verify products are associated
+        self.assertEqual(result.order.products.count(), 2)
+        self.assertIn(self.product1, result.order.products.all())
+        self.assertIn(self.product2, result.order.products.all())
     
-    def test_create_customer_with_invalid_phone(self):
-        """Test customer creation fails with invalid phone and save() is not called"""
-        with patch.object(Customer, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    createCustomer(input: {
-                        name: "Invalid Phone",
-                        email: "invalid@example.com",
-                        phone: "invalid-phone"
-                    }) {
-                        customer {
-                            id
-                        }
-                        message
+    def test_create_order_no_products(self):
+        """Test order creation fails with no products"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateOrder()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    customer_id=str(self.customer.id),
+                    product_ids=[],  # Empty list!
+                    order_date=None
+                )
+            )
+        
+        # Verify error
+        self.assertIn("At least one product must be selected", str(context.exception))
+    
+    def test_create_order_invalid_customer(self):
+        """Test order creation fails with invalid customer ID"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateOrder()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    customer_id="9999",  # Non-existent customer
+                    product_ids=[str(self.product1.id)],
+                    order_date=None
+                )
+            )
+        
+        # Verify error
+        self.assertIn("does not exist", str(context.exception))
+    
+    def test_create_order_invalid_product(self):
+        """Test order creation fails with invalid product ID"""
+        with self.assertRaises(GraphQLError) as context:
+            mutation = CreateOrder()
+            mutation.mutate(
+                None,
+                None,
+                MagicMock(
+                    customer_id=str(self.customer.id),
+                    product_ids=["9999"],  # Non-existent product
+                    order_date=None
+                )
+            )
+        
+        # Verify error
+        self.assertIn("does not exist", str(context.exception))
+
+
+class TestIntegration(TestCase):
+    """Integration tests using GraphQL client"""
+    
+    def test_full_graphql_query(self):
+        """Test full GraphQL schema works"""
+        from your_app.schema import schema
+        
+        # Create a customer first
+        customer = Customer.objects.create(
+            name="GraphQL Customer",
+            email="graphql@example.com",
+            phone="+1234567890"
+        )
+        
+        # Create a product
+        product = Product.objects.create(
+            name="GraphQL Product",
+            price=Decimal("99.99"),
+            stock=10
+        )
+        
+        # Create an order
+        order = Order.objects.create(
+            customer=customer,
+            total_amount=Decimal("99.99")
+        )
+        order.products.add(product)
+        
+        # Test query
+        query = """
+            query {
+                customers {
+                    id
+                    name
+                    email
+                }
+                products {
+                    id
+                    name
+                    price
+                }
+                orders {
+                    id
+                    totalAmount
+                    customer {
+                        id
+                        name
+                    }
+                    products {
+                        id
+                        name
                     }
                 }
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # save() should NOT be called because validation fails
-            self.assertFalse(mock_save.called)
-            
-            # Should have errors
-            self.assertIsNotNone(result.get('errors'))
-            
-            # Verify error message contains phone validation error
-            errors = result['errors'][0]['message']
-            self.assertIn("Invalid phone format", errors)
-    
-    def test_create_product_with_invalid_price(self):
-        """Test product creation fails with invalid price and save() is not called"""
-        with patch.object(Product, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    createProduct(input: {
-                        name: "Invalid Product",
-                        price: -10.00,
-                        stock: 100
-                    }) {
-                        product {
-                            id
-                        }
-                    }
-                }
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # save() should NOT be called because price validation fails
-            self.assertFalse(mock_save.called)
-            
-            # Should have errors
-            self.assertIsNotNone(result.get('errors'))
-            self.assertIn("Price must be a positive number", result['errors'][0]['message'])
-    
-    def test_create_order_with_invalid_customer(self):
-        """Test order creation fails with invalid customer ID and save() is not called"""
-        with patch.object(Order, 'save') as mock_save:
-            mutation = """
-                mutation {
-                    createOrder(input: {
-                        customerId: "9999",  # Non-existent ID
-                        productIds: ["1"]
-                    }) {
-                        order {
-                            id
-                        }
-                    }
-                }
-            """
-            
-            result = self.client.execute(mutation)
-            
-            # save() should NOT be called because customer doesn't exist
-            self.assertFalse(mock_save.called)
-            
-            # Should have errors
-            self.assertIsNotNone(result.get('errors'))
-            self.assertIn("does not exist", result['errors'][0]['message'])
+            }
+        """
+        
+        # Execute query
+        result = schema.execute(query)
+        
+        # Verify no errors
+        self.assertIsNone(result.errors)
+        
+        # Verify data structure
+        self.assertIsNotNone(result.data)
+        self.assertEqual(len(result.data['customers']), 1)
+        self.assertEqual(len(result.data['products']), 1)
+        self.assertEqual(len(result.data['orders']), 1)
