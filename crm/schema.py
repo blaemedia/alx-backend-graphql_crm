@@ -1,292 +1,266 @@
-import re
-from datetime import datetime
-from django.db import transaction, IntegrityError
-from graphene_django import DjangoObjectType
-import graphene
-from graphql import GraphQLError
+# tests/test_graphql.py
+from django.test import TestCase
+from graphene.test import Client
+from unittest.mock import patch, MagicMock
+import json
 from decimal import Decimal
 
-from .models import Customer, Product, Order
+from your_app.schema import schema
+from your_app.models import Customer, Product, Order
 
 
-class Query(graphene.ObjectType):
-    hello = graphene.String(default_value="Hello, GraphQL!")
+class TestGraphQLMutations(TestCase):
+    def setUp(self):
+        self.client = Client(schema)
+        self.test_customer = Customer.objects.create(
+            name="Test Customer",
+            email="customer@example.com",
+            phone="+1234567890"
+        )
+        self.test_product = Product.objects.create(
+            name="Test Product",
+            price=Decimal("29.99"),
+            stock=100
+        )
     
-    # Add customer queries
-    customers = graphene.List(lambda: CustomerType)
-    customer = graphene.Field(lambda: CustomerType, id=graphene.ID(required=True))
-    
-    # Add product queries
-    products = graphene.List(lambda: ProductType)
-    product = graphene.Field(lambda: ProductType, id=graphene.ID(required=True))
-    
-    # Add order queries
-    orders = graphene.List(lambda: OrderType)
-    order = graphene.Field(lambda: OrderType, id=graphene.ID(required=True))
-    
-    def resolve_customers(self, info):
-        return Customer.objects.all()
-    
-    def resolve_customer(self, info, id):
-        try:
-            return Customer.objects.get(id=id)
-        except Customer.DoesNotExist:
-            raise GraphQLError(f"Customer with ID {id} does not exist")
-    
-    def resolve_products(self, info):
-        return Product.objects.all()
-    
-    def resolve_product(self, info, id):
-        try:
-            return Product.objects.get(id=id)
-        except Product.DoesNotExist:
-            raise GraphQLError(f"Product with ID {id} does not exist")
-    
-    def resolve_orders(self, info):
-        return Order.objects.all()
-    
-    def resolve_order(self, info, id):
-        try:
-            return Order.objects.get(id=id)
-        except Order.DoesNotExist:
-            raise GraphQLError(f"Order with ID {id} does not exist")
-
-
-# Define Object Types
-class CustomerType(DjangoObjectType):
-    class Meta:
-        model = Customer
-        fields = "__all__"
-
-
-class ProductType(DjangoObjectType):
-    class Meta:
-        model = Product
-        fields = "__all__"
-
-
-class OrderType(DjangoObjectType):
-    products = graphene.List(ProductType)
-    
-    class Meta:
-        model = Order
-        fields = "__all__"
-    
-    def resolve_products(self, info):
-        return self.products.all()
-
-
-# Input Types
-class CustomerInput(graphene.InputObjectType):
-    name = graphene.String(required=True)
-    email = graphene.String(required=True)
-    phone = graphene.String()
-
-
-class ProductInput(graphene.InputObjectType):
-    name = graphene.String(required=True)
-    price = graphene.Decimal(required=True)
-    stock = graphene.Int()
-
-
-class OrderInput(graphene.InputObjectType):
-    customer_id = graphene.ID(required=True)
-    product_ids = graphene.List(graphene.ID, required=True)
-    order_date = graphene.DateTime()
-
-
-def validate_phone(phone):
-    """Validate phone format (e.g., +1234567890 or 123-456-7890)"""
-    if phone is None or phone == "":
-        return True
-    # Accept both +1234567890 and 123-456-7890 formats
-    pattern = r"^(\+\d{10,15}|\d{3}-\d{3}-\d{4})$"
-    return re.match(pattern, phone)
-
-
-class CreateCustomer(graphene.Mutation):
-    class Arguments:
-        input = CustomerInput(required=True)
-
-    customer = graphene.Field(CustomerType)
-    message = graphene.String()
-
-    @classmethod
-    def mutate(cls, root, info, input):
-        try:
-            # Validate email uniqueness
-            if Customer.objects.filter(email=input.email).exists():
-                raise GraphQLError("Email already exists")
+    def test_create_customer_mutation_save_called(self):
+        """Test GraphQL mutation calls save()"""
+        with patch.object(Customer, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    createCustomer(input: {
+                        name: "John Doe",
+                        email: "john@example.com",
+                        phone: "+1234567890"
+                    }) {
+                        customer {
+                            id
+                            name
+                            email
+                        }
+                        message
+                    }
+                }
+            """
             
-            # Validate phone format
-            if input.phone and not validate_phone(input.phone):
-                raise GraphQLError(
-                    "Invalid phone format. Use +1234567890 or 123-456-7890"
-                )
+            # Execute GraphQL mutation
+            result = self.client.execute(mutation)
             
-            # Create and save customer
-            customer = Customer.objects.create(
-                name=input.name,
-                email=input.email,
-                phone=input.phone
-            )
+            # Check if save was called
+            self.assertTrue(mock_save.called)
             
-            return CreateCustomer(
-                customer=customer,
-                message="Customer created successfully"
-            )
+            # Verify the response
+            self.assertIsNotNone(result.get('data'))
+            self.assertIsNotNone(result['data']['createCustomer']['customer'])
+    
+    def test_bulk_create_customers_save_called(self):
+        """Test bulk create mutation calls save()"""
+        with patch.object(Customer, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    bulkCreateCustomers(inputs: [
+                        {
+                            name: "Customer 1",
+                            email: "customer1@example.com"
+                        },
+                        {
+                            name: "Customer 2",
+                            email: "customer2@example.com",
+                            phone: "+1234567890"
+                        }
+                    ]) {
+                        customers {
+                            id
+                            name
+                        }
+                        errors
+                    }
+                }
+            """
             
-        except GraphQLError as e:
-            raise e
-        except Exception as e:
-            raise GraphQLError(f"Error creating customer: {str(e)}")
-
-
-class BulkCreateCustomers(graphene.Mutation):
-    class Arguments:
-        inputs = graphene.List(CustomerInput, required=True)
-
-    customers = graphene.List(CustomerType)
-    errors = graphene.List(graphene.String)
-
-    @classmethod
-    def mutate(cls, root, info, inputs):
-        created_customers = []
-        errors = []
+            result = self.client.execute(mutation)
+            
+            # Should call save twice (once for each customer)
+            self.assertEqual(mock_save.call_count, 2)
+    
+    def test_create_product_mutation(self):
+        """Test product creation calls save()"""
+        with patch.object(Product, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    createProduct(input: {
+                        name: "Test Product",
+                        price: 29.99,
+                        stock: 100
+                    }) {
+                        product {
+                            id
+                            name
+                            price
+                        }
+                    }
+                }
+            """
+            
+            result = self.client.execute(mutation)
+            self.assertTrue(mock_save.called)
+    
+    def test_create_order_mutation(self):
+        """Test order creation calls save() and validates properly"""
+        with patch.object(Order, 'save') as mock_save:
+            # Prepare mutation with existing customer and product IDs
+            mutation = f"""
+                mutation {{
+                    createOrder(input: {{
+                        customerId: "{self.test_customer.id}",
+                        productIds: ["{self.test_product.id}"],
+                        orderDate: "2024-01-15T10:00:00Z"
+                    }}) {{
+                        order {{
+                            id
+                            totalAmount
+                            orderDate
+                            customer {{
+                                id
+                                name
+                            }}
+                            products {{
+                                id
+                                name
+                            }}
+                        }}
+                    }}
+                }}
+            """
+            
+            result = self.client.execute(mutation)
+            
+            # Check if save was called on Order
+            self.assertTrue(mock_save.called)
+            
+            # Verify response structure
+            self.assertIsNotNone(result.get('data'))
+            self.assertIsNotNone(result['data']['createOrder']['order'])
+            
+            # Verify total amount calculation
+            order_data = result['data']['createOrder']['order']
+            self.assertEqual(order_data['totalAmount'], "29.99")
+    
+    def test_create_order_with_multiple_products(self):
+        """Test order creation with multiple products calls save()"""
+        # Create additional product
+        product2 = Product.objects.create(
+            name="Product 2",
+            price=Decimal("15.50"),
+            stock=50
+        )
         
-        try:
-            with transaction.atomic():
-                for idx, input_data in enumerate(inputs):
-                    try:
-                        # Validate required fields
-                        if not input_data.name or not input_data.email:
-                            errors.append(f"Row {idx + 1}: Name and email are required")
-                            continue
-                        
-                        # Validate email uniqueness
-                        if Customer.objects.filter(email=input_data.email).exists():
-                            errors.append(f"Row {idx + 1}: Email '{input_data.email}' already exists")
-                            continue
-                        
-                        # Validate phone format
-                        if input_data.phone and not validate_phone(input_data.phone):
-                            errors.append(
-                                f"Row {idx + 1}: Invalid phone format '{input_data.phone}'. "
-                                f"Use +1234567890 or 123-456-7890"
-                            )
-                            continue
-                        
-                        # Create customer
-                        customer = Customer.objects.create(
-                            name=input_data.name,
-                            email=input_data.email,
-                            phone=input_data.phone if input_data.phone else None
-                        )
-                        created_customers.append(customer)
-                        
-                    except Exception as e:
-                        errors.append(f"Row {idx + 1}: {str(e)}")
-                
-                # Commit transaction only if no errors in validation
-                return BulkCreateCustomers(
-                    customers=created_customers,
-                    errors=errors
-                )
-                
-        except Exception as e:
-            raise GraphQLError(f"Transaction error: {str(e)}")
-
-
-class CreateProduct(graphene.Mutation):
-    class Arguments:
-        input = ProductInput(required=True)
-
-    product = graphene.Field(ProductType)
-
-    @classmethod
-    def mutate(cls, root, info, input):
-        try:
-            # Validate price is positive
-            if input.price <= 0:
-                raise GraphQLError("Price must be a positive number")
+        with patch.object(Order, 'save') as mock_save:
+            mutation = f"""
+                mutation {{
+                    createOrder(input: {{
+                        customerId: "{self.test_customer.id}",
+                        productIds: ["{self.test_product.id}", "{product2.id}"],
+                        orderDate: "2024-01-15T10:00:00Z"
+                    }}) {{
+                        order {{
+                            id
+                            totalAmount
+                            products {{
+                                id
+                                name
+                            }}
+                        }}
+                    }}
+                }}
+            """
             
-            # Validate stock is not negative
-            stock = input.stock if input.stock is not None else 0
-            if stock < 0:
-                raise GraphQLError("Stock cannot be negative")
+            result = self.client.execute(mutation)
             
-            # Create and save product
-            product = Product.objects.create(
-                name=input.name,
-                price=Decimal(str(input.price)),
-                stock=stock
-            )
+            # Check if save was called
+            self.assertTrue(mock_save.called)
             
-            return CreateProduct(product=product)
+            # Verify total amount is sum of both products
+            order_data = result['data']['createOrder']['order']
+            self.assertEqual(order_data['totalAmount'], "45.49")  # 29.99 + 15.50
+    
+    def test_create_customer_with_invalid_phone(self):
+        """Test customer creation fails with invalid phone and save() is not called"""
+        with patch.object(Customer, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    createCustomer(input: {
+                        name: "Invalid Phone",
+                        email: "invalid@example.com",
+                        phone: "invalid-phone"
+                    }) {
+                        customer {
+                            id
+                        }
+                        message
+                    }
+                }
+            """
             
-        except GraphQLError as e:
-            raise e
-        except Exception as e:
-            raise GraphQLError(f"Error creating product: {str(e)}")
-
-
-class CreateOrder(graphene.Mutation):
-    class Arguments:
-        input = OrderInput(required=True)
-
-    order = graphene.Field(OrderType)
-
-    @classmethod
-    def mutate(cls, root, info, input):
-        try:
-            # Validate at least one product
-            if not input.product_ids or len(input.product_ids) == 0:
-                raise GraphQLError("At least one product must be selected")
+            result = self.client.execute(mutation)
             
-            # Get customer
-            try:
-                customer = Customer.objects.get(id=input.customer_id)
-            except Customer.DoesNotExist:
-                raise GraphQLError(f"Customer with ID {input.customer_id} does not exist")
+            # save() should NOT be called because validation fails
+            self.assertFalse(mock_save.called)
             
-            # Get products
-            products = []
-            total_amount = Decimal('0')
-            for product_id in input.product_ids:
-                try:
-                    product = Product.objects.get(id=product_id)
-                    products.append(product)
-                    total_amount += Decimal(str(product.price))
-                except Product.DoesNotExist:
-                    raise GraphQLError(f"Product with ID {product_id} does not exist")
+            # Should have errors
+            self.assertIsNotNone(result.get('errors'))
             
-            # Validate we have all requested products
-            if len(products) != len(input.product_ids):
-                raise GraphQLError("One or more product IDs are invalid")
+            # Verify error message contains phone validation error
+            errors = result['errors'][0]['message']
+            self.assertIn("Invalid phone format", errors)
+    
+    def test_create_product_with_invalid_price(self):
+        """Test product creation fails with invalid price and save() is not called"""
+        with patch.object(Product, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    createProduct(input: {
+                        name: "Invalid Product",
+                        price: -10.00,
+                        stock: 100
+                    }) {
+                        product {
+                            id
+                        }
+                    }
+                }
+            """
             
-            # Create order
-            order = Order.objects.create(
-                customer=customer,
-                total_amount=total_amount,
-                order_date=input.order_date if input.order_date else datetime.now()
-            )
+            result = self.client.execute(mutation)
             
-            # Associate products with order
-            order.products.set(products)
+            # save() should NOT be called because price validation fails
+            self.assertFalse(mock_save.called)
             
-            return CreateOrder(order=order)
+            # Should have errors
+            self.assertIsNotNone(result.get('errors'))
+            self.assertIn("Price must be a positive number", result['errors'][0]['message'])
+    
+    def test_create_order_with_invalid_customer(self):
+        """Test order creation fails with invalid customer ID and save() is not called"""
+        with patch.object(Order, 'save') as mock_save:
+            mutation = """
+                mutation {
+                    createOrder(input: {
+                        customerId: "9999",  # Non-existent ID
+                        productIds: ["1"]
+                    }) {
+                        order {
+                            id
+                        }
+                    }
+                }
+            """
             
-        except GraphQLError as e:
-            raise e
-        except Exception as e:
-            raise GraphQLError(f"Error creating order: {str(e)}")
-
-
-class Mutation(graphene.ObjectType):
-    create_customer = CreateCustomer.Field()
-    bulk_create_customers = BulkCreateCustomers.Field()
-    create_product = CreateProduct.Field()
-    create_order = CreateOrder.Field()
-
-
-schema = graphene.Schema(query=Query, mutation=Mutation)
+            result = self.client.execute(mutation)
+            
+            # save() should NOT be called because customer doesn't exist
+            self.assertFalse(mock_save.called)
+            
+            # Should have errors
+            self.assertIsNotNone(result.get('errors'))
+            self.assertIn("does not exist", result['errors'][0]['message'])
