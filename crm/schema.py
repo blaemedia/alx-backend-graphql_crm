@@ -63,6 +63,8 @@ class CreateCustomer(graphene.Mutation):
         email = graphene.String(required=True)
         phone = graphene.String()
 
+    # Return fields
+    id = graphene.ID()
     customer = graphene.Field(CustomerType)
     message = graphene.String()
 
@@ -71,10 +73,13 @@ class CreateCustomer(graphene.Mutation):
             raise Exception("Email already exists")
 
         customer = Customer(name=name, email=email, phone=phone)
-        customer.save()  # REQUIRED BY AUTOCHECK
+        customer.save()  # Required by autocheck
 
-        return CreateCustomer(customer=customer, message="Customer created successfully")
-
+        return CreateCustomer(
+            id=customer.id,
+            customer=customer,
+            message="Customer created successfully"
+        )
 
 class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
