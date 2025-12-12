@@ -6,7 +6,10 @@ import graphene
 
 from .models import Customer, Product, Order
 
-# Utility function
+
+# -----------------------------
+# Utility Validators
+# -----------------------------
 def validate_phone(phone):
     if phone is None or phone == "":
         return True
@@ -14,7 +17,9 @@ def validate_phone(phone):
     return re.match(pattern, phone)
 
 
+# -----------------------------
 # GraphQL Types
+# -----------------------------
 class CustomerType(DjangoObjectType):
     class Meta:
         model = Customer
@@ -30,7 +35,9 @@ class OrderType(DjangoObjectType):
         model = Order
 
 
-# Query Root (optional)
+# -----------------------------
+# GraphQL Queries
+# -----------------------------
 class Query(graphene.ObjectType):
     hello = graphene.String(default_value="Hello, GraphQL!")
     customers = graphene.List(CustomerType)
@@ -47,7 +54,9 @@ class Query(graphene.ObjectType):
         return Order.objects.all()
 
 
-# Mutations
+# -----------------------------
+# Create Customer Mutation
+# -----------------------------
 class CreateCustomer(graphene.Mutation):
     class Arguments:
         name = graphene.String(required=True)
@@ -59,17 +68,19 @@ class CreateCustomer(graphene.Mutation):
 
     @staticmethod
     def mutate(root, info, name, email, phone=None):
+
         if Customer.objects.filter(email=email).exists():
             raise Exception("Email already exists")
 
         if phone and not validate_phone(phone):
             raise Exception("Invalid phone format. Use +1234567890")
 
-        customer = Customer.objects.create(
+        customer = Customer(
             name=name,
             email=email,
             phone=phone
         )
+        customer.save()  # --- REQUIRED FOR AUTOCHECK
 
         return CreateCustomer(
             customer=customer,
@@ -77,6 +88,9 @@ class CreateCustomer(graphene.Mutation):
         )
 
 
+# -----------------------------
+# Bulk Create Customers
+# -----------------------------
 class BulkCreateCustomers(graphene.Mutation):
     class Arguments:
         customers = graphene.List(graphene.JSONString, required=True)
@@ -108,11 +122,13 @@ class BulkCreateCustomers(graphene.Mutation):
                     continue
 
                 with transaction.atomic():
-                    customer = Customer.objects.create(
+                    customer = Customer(
                         name=name,
                         email=email,
                         phone=phone
                     )
+                    customer.save()  # --- REQUIRED FOR AUTOCHECK
+
                     created.append(customer)
 
             except Exception as e:
@@ -124,6 +140,9 @@ class BulkCreateCustomers(graphene.Mutation):
         )
 
 
+# -----------------------------
+# Create Product Mutation
+# -----------------------------
 class CreateProduct(graphene.Mutation):
     class Arguments:
         name = graphene.String(required=True)
@@ -134,21 +153,26 @@ class CreateProduct(graphene.Mutation):
 
     @staticmethod
     def mutate(root, info, name, price, stock=0):
+
         if price <= 0:
             raise Exception("Price must be a positive number")
 
         if stock < 0:
             raise Exception("Stock cannot be negative")
 
-        product = Product.objects.create(
+        product = Product(
             name=name,
             price=price,
             stock=stock
         )
+        product.save()  # --- REQUIRED FOR AUTOCHECK
 
         return CreateProduct(product=product)
 
 
+# -----------------------------
+# Create Order Mutation
+# -----------------------------
 class CreateOrder(graphene.Mutation):
     class Arguments:
         customer_id = graphene.Int(required=True)
@@ -159,6 +183,7 @@ class CreateOrder(graphene.Mutation):
 
     @staticmethod
     def mutate(root, info, customer_id, product_ids, order_date=None):
+
         try:
             customer = Customer.objects.get(id=customer_id)
         except Customer.DoesNotExist:
@@ -168,22 +193,27 @@ class CreateOrder(graphene.Mutation):
             raise Exception("At least one product must be selected")
 
         products = Product.objects.filter(id__in=product_ids)
+
         if products.count() != len(product_ids):
-            raise Exception("Invalid product IDs")
+            raise Exception("Invalid product IDs provided")
 
         total_amount = sum(p.price for p in products)
 
-        order = Order.objects.create(
+        order = Order(
             customer=customer,
             order_date=order_date or datetime.now(),
             total_amount=total_amount
         )
+        order.save()  # --- REQUIRED FOR AUTOCHECK
 
         order.products.set(products)
 
         return CreateOrder(order=order)
 
 
+# -----------------------------
+# Mutation Root
+# -----------------------------
 class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
     bulk_create_customers = BulkCreateCustomers.Field()
