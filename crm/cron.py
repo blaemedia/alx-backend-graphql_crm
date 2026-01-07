@@ -23,67 +23,123 @@ def log_crm_heartbeat():
     
     # Optional: Query GraphQL hello field to verify endpoint
     try:
-        # First, try to import necessary GraphQL components
-        # This assumes you have graphene-django installed
-        from django.test import Client
-        import json
+        # Method 1: Try using the gql library if available
+        try:
+            from gql import gql, Client
+            from gql.transport.requests import RequestsHTTPTransport
+            
+            # Determine the GraphQL endpoint URL
+            # Try to get it from settings, or use a default
+            graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
+            
+            # Create a transport for the GraphQL endpoint
+            transport = RequestsHTTPTransport(
+                url=graphql_url,
+                verify=True,
+                retries=3,
+            )
+            
+            # Create a GraphQL client
+            client = Client(transport=transport, fetch_schema_from_transport=False)
+            
+            # Define the GraphQL query
+            query = gql("""
+                query {
+                    hello
+                }
+            """)
+            
+            # Execute the query
+            result = client.execute(query)
+            
+            # Append GraphQL status to log
+            with open(log_file_path, 'a') as f:
+                if 'hello' in result:
+                    f.write(f"{current_time} GraphQL endpoint responsive: {result['hello']}\n")
+                else:
+                    f.write(f"{current_time} GraphQL endpoint responded with unexpected format\n")
+            
+        except ImportError:
+            # gql library not installed, fall back to method 2
+            raise ImportError("gql library not available")
+            
+    except ImportError:
+        # Method 2: Fall back to using requests library
+        try:
+            import requests
+            
+            # Determine the GraphQL endpoint URL
+            graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
+            
+            # Prepare the GraphQL query
+            query = {
+                "query": "query { hello }"
+            }
+            
+            # Make the request
+            response = requests.post(
+                graphql_url,
+                json=query,
+                headers={'Content-Type': 'application/json'},
+                timeout=5  # 5 second timeout
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                with open(log_file_path, 'a') as f:
+                    if 'data' in result and 'hello' in result['data']:
+                        f.write(f"{current_time} GraphQL endpoint responsive: {result['data']['hello']}\n")
+                    else:
+                        f.write(f"{current_time} GraphQL endpoint responded with: {result}\n")
+            else:
+                with open(log_file_path, 'a') as f:
+                    f.write(f"{current_time} GraphQL endpoint returned status: {response.status_code}\n")
+                    
+        except ImportError:
+            # requests library not installed, fall back to method 3
+            with open(log_file_path, 'a') as f:
+                f.write(f"{current_time} Note: Both gql and requests libraries not available for GraphQL check\n")
+                
+        except Exception as e:
+            # Log any other errors during requests-based GraphQL check
+            with open(log_file_path, 'a') as f:
+                f.write(f"{current_time} GraphQL check failed (requests): {str(e)}\n")
+    
+    except Exception as e:
+        # Log any other errors during gql-based GraphQL check
+        with open(log_file_path, 'a') as f:
+            f.write(f"{current_time} GraphQL check failed (gql): {str(e)}\n")
+    
+    return "Heartbeat logged successfully"
+
+# Alternative implementation using Django's test framework (for completeness)
+def check_graphql_via_django_test():
+    """
+    Alternative method to check GraphQL using Django's test client
+    This doesn't require external HTTP calls
+    """
+    try:
+        from django.test import Client as DjangoTestClient
         
-        client = Client()
+        client = DjangoTestClient()
         
         # Query the GraphQL endpoint for the hello field
-        # Adjust the query based on your actual GraphQL schema
         query = {
             'query': 'query { hello }'
         }
         
         # Make a POST request to your GraphQL endpoint
-        # Adjust the endpoint URL if different
         response = client.post(
-            '/graphql/', 
+            '/graphql/',
             data=json.dumps(query),
             content_type='application/json'
         )
         
         if response.status_code == 200:
             result = json.loads(response.content)
-            
-            # Append GraphQL status to log
-            with open(log_file_path, 'a') as f:
-                if 'data' in result and 'hello' in result['data']:
-                    f.write(f"{current_time} GraphQL endpoint responsive: {result['data']['hello']}\n")
-                else:
-                    f.write(f"{current_time} GraphQL endpoint responded with unexpected format\n")
+            return result
         else:
-            with open(log_file_path, 'a') as f:
-                f.write(f"{current_time} GraphQL endpoint returned status: {response.status_code}\n")
-                
-    except ImportError as e:
-        # graphene-django not installed or not available
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} Note: GraphQL check skipped (graphene-django not available)\n")
-    except Exception as e:
-        # Log any other errors during GraphQL check
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} GraphQL check failed: {str(e)}\n")
-    
-    return "Heartbeat logged successfully"
-
-# Alternative implementation if you want to use direct schema execution
-def check_graphql_health():
-    """
-    Alternative method to check GraphQL health by directly executing schema
-    """
-    try:
-        # Import your schema
-        from crm.schema import schema
-        
-        # Execute a simple query
-        result = schema.execute('{ hello }')
-        
-        if result.errors:
-            return f"GraphQL errors: {result.errors}"
-        else:
-            return f"GraphQL data: {result.data}"
+            return {"error": f"HTTP {response.status_code}"}
             
     except Exception as e:
-        return f"GraphQL health check failed: {str(e)}"
+        return {"error": str(e)}
