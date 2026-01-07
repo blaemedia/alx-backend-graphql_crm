@@ -1,419 +1,227 @@
-import os
+import graphene
+from graphene_django import DjangoObjectType
+from graphene_django.filter import DjangoFilterConnectionField
+from django.db.models import Q, F
 from datetime import datetime
-import json
-from django.conf import settings
 
-def log_crm_heartbeat():
-    """
-    Logs a heartbeat message every 5 minutes to confirm CRM application health.
-    Optionally queries GraphQL endpoint to verify responsiveness.
-    """
+# Import the Product model (and other models)
+from .models import Customer, Product, Order  # Make sure Product is imported
+from .filters import CustomerFilter, ProductFilter, OrderFilter
+
+# GraphQL Types
+class CustomerType(DjangoObjectType):
+    class Meta:
+        model = Customer
+        filterset_class = CustomerFilter
+        interfaces = (graphene.relay.Node,)
+
+
+class ProductType(DjangoObjectType):
+    class Meta:
+        model = Product
+        filterset_class = ProductFilter
+        interfaces = (graphene.relay.Node,)
     
-    # Get current timestamp in the specified format
-    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
-    message = f"{current_time} CRM is alive"
+    # Optional: Add computed fields if needed
+    is_low_stock = graphene.Boolean()
     
-    # Log to the specified file
-    log_file_path = "/tmp/crm_heartbeat_log.txt"
+    def resolve_is_low_stock(self, info):
+        # Consider stock < 10 as low stock
+        return self.stock < 10 if self.stock is not None else False
+
+
+class OrderType(DjangoObjectType):
+    class Meta:
+        model = Order
+        filterset_class = OrderFilter
+        interfaces = (graphene.relay.Node,)
+
+
+# Input type for order_by sorting
+class OrderByInput(graphene.InputObjectType):
+    field = graphene.String(required=True)
+
+
+# Types for low-stock update response
+class UpdatedProductType(graphene.ObjectType):
+    id = graphene.ID()
+    name = graphene.String()
+    sku = graphene.String()
+    old_stock = graphene.Int()
+    new_stock = graphene.Int()
+    category = graphene.String()
+
+
+class UpdateLowStockProductsResponse(graphene.ObjectType):
+    success = graphene.Boolean()
+    message = graphene.String()
+    updated_count = graphene.Int()
+    updated_products = graphene.List(UpdatedProductType)
+    timestamp = graphene.String()
+
+
+# Query class with all existing queries plus hello
+class Query(graphene.ObjectType):
+    hello = graphene.String(default_value="Hello from CRM!")
     
-    # Append to file (create if doesn't exist)
-    with open(log_file_path, 'a') as f:
-        f.write(f"{message}\n")
+    all_customers = DjangoFilterConnectionField(CustomerType, order_by=graphene.String())
+    all_products = DjangoFilterConnectionField(ProductType, order_by=graphene.String())
+    all_orders = DjangoFilterConnectionField(OrderType, order_by=graphene.String())
     
-    # Optional: Query GraphQL hello field to verify endpoint
-    try:
-        import requests
-        
-        # Determine the GraphQL endpoint URL
-        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
-        
-        # Prepare the GraphQL query
-        query = {
-            "query": "query { hello }"
-        }
-        
-        # Make the request with timeout
-        response = requests.post(
-            graphql_url,
-            json=query,
-            headers={'Content-Type': 'application/json'},
-            timeout=5  # 5 second timeout
+    # Add a specific query for low-stock products
+    low_stock_products = DjangoFilterConnectionField(
+        ProductType, 
+        order_by=graphene.String(),
+        threshold=graphene.Int(required=False, default_value=10)
+    )
+
+    def resolve_hello(self, info):
+        return "CRM GraphQL endpoint is healthy"
+    
+    def resolve_all_customers(self, info, order_by=None, **kwargs):
+        qs = Customer.objects.all()
+        if order_by:
+            qs = qs.order_by(order_by)
+        return qs
+
+    def resolve_all_products(self, info, order_by=None, **kwargs):
+        qs = Product.objects.all()
+        if order_by:
+            qs = qs.order_by(order_by)
+        return qs
+
+    def resolve_all_orders(self, info, order_by=None, **kwargs):
+        qs = Order.objects.all()
+        if order_by:
+            qs = qs.order_by(order_by)
+        return qs
+    
+    def resolve_low_stock_products(self, info, threshold=10, order_by=None, **kwargs):
+        """Return products with stock below the threshold"""
+        qs = Product.objects.filter(stock__lt=threshold)
+        if order_by:
+            qs = qs.order_by(order_by)
+        return qs
+
+
+# --- Mutations ---
+
+class CreateCustomer(graphene.Mutation):
+    class Arguments:
+        name = graphene.String(required=True)
+        email = graphene.String(required=True)
+        phone = graphene.String()
+
+    # Return fields
+    id = graphene.ID()
+    customer = graphene.Field(CustomerType)
+    message = graphene.String()
+
+    def mutate(self, info, name, email, phone=None):
+        if Customer.objects.filter(email=email).exists():
+            raise Exception("Email already exists")
+
+        customer = Customer(name=name, email=email, phone=phone)
+        customer.save()
+
+        return CreateCustomer(
+            id=customer.id,
+            customer=customer,
+            message="Customer created successfully"
         )
-        
-        # Log the result
-        with open(log_file_path, 'a') as f:
-            if response.status_code == 200:
-                result = response.json()
-                if 'data' in result and 'hello' in result['data']:
-                    f.write(f"{current_time} GraphQL endpoint responsive: {result['data']['hello']}\n")
-                else:
-                    f.write(f"{current_time} GraphQL endpoint responded with unexpected format: {result}\n")
-            else:
-                f.write(f"{current_time} GraphQL endpoint returned HTTP {response.status_code}\n")
-                
-    except requests.exceptions.Timeout:
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} GraphQL endpoint timeout (5 seconds)\n")
-    except requests.exceptions.ConnectionError:
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} GraphQL endpoint connection failed\n")
-    except ImportError:
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} Note: requests library not installed for GraphQL check\n")
-    except Exception as e:
-        with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} GraphQL check failed: {str(e)}\n")
-    
-    return "Heartbeat logged successfully"
 
 
-def update_low_stock():
-    """
-    Cron job that runs every 12 hours to update low-stock products.
-    Executes GraphQL mutation and logs the updates.
-    """
+class UpdateLowStockProducts(graphene.Mutation):
+    class Arguments:
+        threshold = graphene.Int(default_value=10)
+        increment_by = graphene.Int(default_value=10)
+        dry_run = graphene.Boolean(default_value=False)
     
-    # Get current timestamp
-    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
-    log_file_path = "/tmp/low_stock_updates_log.txt"
+    Output = UpdateLowStockProductsResponse
     
-    # Initialize log message
-    log_message = f"\n{'='*60}\n"
-    log_message += f"Low Stock Update - {current_time}\n"
-    log_message += f"{'='*60}\n"
-    
-    try:
-        import requests
+    def mutate(self, info, threshold=10, increment_by=10, dry_run=False):
+        # Get current timestamp
+        timestamp = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
         
-        # Get GraphQL endpoint URL
-        base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
-        graphql_url = f"{base_url}/graphql/"
-        
-        # GraphQL mutation to update low stock products
-        # Using the simple mutation without arguments for default behavior
-        mutation = """
-            mutation UpdateLowStock {
-                updateLowStockProducts {
-                    success
-                    message
-                    updatedCount
-                    timestamp
-                    updatedProducts {
-                        id
-                        name
-                        oldStock
-                        newStock
-                    }
-                }
-            }
-        """
-        
-        # Alternative: Mutation with custom parameters
-        # mutation = """
-        #     mutation UpdateLowStock {
-        #         updateLowStockProducts(threshold: 10, incrementBy: 10) {
-        #             success
-        #             message
-        #             updatedCount
-        #             timestamp
-        #             updatedProducts {
-        #                 id
-        #                 name
-        #                 oldStock
-        #                 newStock
-        #             }
-        #         }
-        #     }
-        # """
-        
-        # Make the GraphQL request
-        response = requests.post(
-            graphql_url,
-            json={'query': mutation},
-            headers={'Content-Type': 'application/json'},
-            timeout=30  # 30 second timeout for potentially many updates
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
+        try:
+            # Query products with stock below threshold
+            low_stock_products = Product.objects.filter(stock__lt=threshold)
             
-            if 'errors' in result:
-                # GraphQL errors
-                log_message += f"GraphQL Errors:\n"
-                for error in result['errors']:
-                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
-                    if 'locations' in error:
-                        loc = error['locations'][0]
-                        log_message += f"    at line {loc.get('line')}, column {loc.get('column')}\n"
-            else:
-                data = result.get('data', {}).get('updateLowStockProducts', {})
-                success = data.get('success', False)
-                message = data.get('message', 'No message returned')
-                updated_count = data.get('updatedCount', 0)
-                updated_products = data.get('updatedProducts', [])
-                timestamp = data.get('timestamp', 'Unknown time')
+            updated_products_data = []
+            updated_count = 0
+            
+            if dry_run:
+                # Simulate update without saving
+                for product in low_stock_products:
+                    updated_products_data.append({
+                        'id': product.id,
+                        'name': product.name,
+                        'sku': product.sku if hasattr(product, 'sku') else 'N/A',
+                        'old_stock': product.stock,
+                        'new_stock': product.stock + increment_by,
+                        'category': str(product.category) if hasattr(product, 'category') and product.category else None
+                    })
                 
-                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
-                log_message += f"Message: {message}\n"
-                log_message += f"Mutation Timestamp: {timestamp}\n"
-                log_message += f"Total Updated: {updated_count}\n\n"
-                
-                if updated_products:
-                    log_message += f"Updated Products:\n"
-                    log_message += f"{'-'*60}\n"
+                return UpdateLowStockProductsResponse(
+                    success=True,
+                    message=f"Dry run: Would update {len(updated_products_data)} products below stock threshold {threshold}",
+                    updated_count=len(updated_products_data),
+                    updated_products=updated_products_data,
+                    timestamp=timestamp
+                )
+            
+            # Actually update the products
+            for product in low_stock_products:
+                try:
+                    old_stock = product.stock
+                    product.stock = F('stock') + increment_by
+                    product.save()
                     
-                    for product in updated_products:
-                        product_name = product.get('name', 'Unknown Product')
-                        product_id = product.get('id', 'N/A')
-                        old_stock = product.get('oldStock', 'N/A')
-                        new_stock = product.get('newStock', 'N/A')
-                        
-                        log_message += f"  • {product_name} "
-                        log_message += f"(ID: {product_id}): "
-                        log_message += f"Stock {old_stock} → {new_stock} "
-                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
-                else:
-                    log_message += "No low-stock products were updated.\n"
-        else:
-            log_message += f"HTTP Error: {response.status_code}\n"
-            log_message += f"Response: {response.text[:500]}...\n"  # Truncate long responses
-    
-    except requests.exceptions.Timeout:
-        log_message += f"ERROR: Request timed out after 30 seconds\n"
-    except requests.exceptions.ConnectionError:
-        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
-        log_message += f"ERROR: Could not connect to GraphQL endpoint at {graphql_url}\n"
-    except ImportError:
-        log_message += f"ERROR: requests library not installed. Install with: pip install requests\n"
-    except Exception as e:
-        log_message += f"ERROR: {str(e)}\n"
-        import traceback
-        log_message += f"Traceback: {traceback.format_exc()}\n"
-    
-    # Add execution timestamp at the end
-    log_message += f"{'='*60}\n"
-    log_message += f"Execution completed at: {datetime.now().strftime('%d/%m/%Y-%H:%M:%S')}\n"
-    log_message += f"{'='*60}\n\n"
-    
-    # Append to log file
-    with open(log_file_path, 'a') as f:
-        f.write(log_message)
-    
-    return f"Low stock update completed at {current_time}"
-
-
-def update_low_stock_django():
-    """
-    Alternative version using Django's test client (no external HTTP needed).
-    This is more efficient as it doesn't require HTTP requests.
-    """
-    from datetime import datetime
-    from django.test import Client
-    
-    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
-    log_file_path = "/tmp/low_stock_updates_log.txt"
-    
-    # Initialize log
-    log_message = f"\n{'='*60}\n"
-    log_message += f"Low Stock Update (Django Client) - {current_time}\n"
-    log_message += f"{'='*60}\n"
-    
-    try:
-        client = Client()
-        
-        # GraphQL mutation
-        mutation = {
-            "query": """
-                mutation UpdateLowStock {
-                    updateLowStockProducts {
-                        success
-                        message
-                        updatedCount
-                        timestamp
-                        updatedProducts {
-                            id
-                            name
-                            oldStock
-                            newStock
-                        }
-                    }
-                }
-            """
-        }
-        
-        # Make the request
-        response = client.post(
-            '/graphql/',
-            data=json.dumps(mutation),
-            content_type='application/json'
-        )
-        
-        if response.status_code == 200:
-            result = json.loads(response.content)
-            
-            if 'errors' in result:
-                log_message += f"GraphQL Errors:\n"
-                for error in result['errors']:
-                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
-            else:
-                data = result.get('data', {}).get('updateLowStockProducts', {})
-                success = data.get('success', False)
-                message = data.get('message', 'No message returned')
-                updated_count = data.get('updatedCount', 0)
-                updated_products = data.get('updatedProducts', [])
-                
-                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
-                log_message += f"Message: {message}\n"
-                log_message += f"Total Updated: {updated_count}\n\n"
-                
-                if updated_products:
-                    log_message += f"Updated Products:\n"
-                    log_message += f"{'-'*60}\n"
+                    # Refresh to get the updated value
+                    product.refresh_from_db()
                     
-                    for product in updated_products:
-                        product_name = product.get('name', 'Unknown Product')
-                        product_id = product.get('id', 'N/A')
-                        old_stock = product.get('oldStock', 'N/A')
-                        new_stock = product.get('newStock', 'N/A')
-                        
-                        log_message += f"  • {product_name} "
-                        log_message += f"(ID: {product_id}): "
-                        log_message += f"Stock {old_stock} → {new_stock} "
-                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
-                else:
-                    log_message += "No low-stock products were updated.\n"
-        else:
-            log_message += f"HTTP Error: {response.status_code}\n"
-            try:
-                log_message += f"Response: {response.content.decode()}\n"
-            except:
-                log_message += f"Response: {response.content}\n"
-            
-    except Exception as e:
-        log_message += f"ERROR: {str(e)}\n"
-        import traceback
-        log_message += f"Traceback: {traceback.format_exc()}\n"
-    
-    # Add execution timestamp at the end
-    log_message += f"{'='*60}\n"
-    log_message += f"Execution completed at: {datetime.now().strftime('%d/%m/%Y-%H:%M:%S')}\n"
-    log_message += f"{'='*60}\n\n"
-    
-    # Append to log file
-    with open(log_file_path, 'a') as f:
-        f.write(log_message)
-    
-    return f"Low stock update completed at {current_time}"
-
-
-def test_low_stock_dry_run():
-    """
-    Test function to simulate low stock update without actually updating.
-    Useful for debugging and testing.
-    """
-    from datetime import datetime
-    import requests
-    
-    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
-    log_file_path = "/tmp/low_stock_test_log.txt"
-    
-    log_message = f"\n{'='*60}\n"
-    log_message += f"Low Stock DRY RUN Test - {current_time}\n"
-    log_message += f"{'='*60}\n"
-    
-    try:
-        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
-        
-        # Mutation with dryRun parameter set to true
-        mutation = {
-            "query": """
-                mutation UpdateLowStock {
-                    updateLowStockProducts(dryRun: true) {
-                        success
-                        message
-                        updatedCount
-                        timestamp
-                        updatedProducts {
-                            id
-                            name
-                            oldStock
-                            newStock
-                        }
-                    }
-                }
-            """
-        }
-        
-        response = requests.post(
-            graphql_url,
-            json=mutation,
-            headers={'Content-Type': 'application/json'},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            log_message += f"DRY RUN - No actual updates were made\n\n"
-            
-            if 'errors' in result:
-                log_message += f"GraphQL Errors:\n"
-                for error in result['errors']:
-                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
-            else:
-                data = result.get('data', {}).get('updateLowStockProducts', {})
-                success = data.get('success', False)
-                message = data.get('message', 'No message returned')
-                updated_count = data.get('updatedCount', 0)
-                updated_products = data.get('updatedProducts', [])
-                
-                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
-                log_message += f"Message: {message}\n"
-                log_message += f"Would update: {updated_count} products\n\n"
-                
-                if updated_products:
-                    log_message += f"Products that would be updated:\n"
-                    log_message += f"{'-'*60}\n"
+                    updated_products_data.append({
+                        'id': product.id,
+                        'name': product.name,
+                        'sku': product.sku if hasattr(product, 'sku') else 'N/A',
+                        'old_stock': old_stock,
+                        'new_stock': product.stock,
+                        'category': str(product.category) if hasattr(product, 'category') and product.category else None
+                    })
+                    updated_count += 1
                     
-                    for product in updated_products:
-                        product_name = product.get('name', 'Unknown Product')
-                        product_id = product.get('id', 'N/A')
-                        old_stock = product.get('oldStock', 'N/A')
-                        new_stock = product.get('newStock', 'N/A')
-                        
-                        log_message += f"  • {product_name} "
-                        log_message += f"(ID: {product_id}): "
-                        log_message += f"Stock {old_stock} → {new_stock} "
-                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
-                else:
-                    log_message += "No low-stock products found.\n"
-        else:
-            log_message += f"HTTP Error: {response.status_code}\n"
-            log_message += f"Response: {response.text[:500]}...\n"
-    
-    except Exception as e:
-        log_message += f"ERROR: {str(e)}\n"
-    
-    # Append to log file
-    with open(log_file_path, 'a') as f:
-        f.write(log_message)
-    
-    print(f"Dry run test completed. Check {log_file_path} for results.")
-    return "Dry run test completed"
+                except Exception as e:
+                    # Log individual product errors but continue with others
+                    print(f"Error updating product {product.id}: {str(e)}")
+                    continue
+            
+            message = f"Successfully updated {updated_count} low-stock products"
+            if updated_count == 0:
+                message = "No products found below the stock threshold"
+            
+            return UpdateLowStockProductsResponse(
+                success=True,
+                message=message,
+                updated_count=updated_count,
+                updated_products=updated_products_data,
+                timestamp=timestamp
+            )
+            
+        except Exception as e:
+            return UpdateLowStockProductsResponse(
+                success=False,
+                message=f"Error updating low-stock products: {str(e)}",
+                updated_count=0,
+                updated_products=[],
+                timestamp=timestamp
+            )
 
 
-# Quick test function
-def test_cron_functions():
-    """Test both cron functions and print results."""
-    print("Testing CRM Heartbeat...")
-    result1 = log_crm_heartbeat()
-    print(f"Heartbeat: {result1}")
-    
-    print("\nTesting Low Stock Update (Django Client)...")
-    result2 = update_low_stock_django()
-    print(f"Low Stock Update: {result2}")
-    
-    print("\nCheck log files:")
-    print("  Heartbeat: /tmp/crm_heartbeat_log.txt")
-    print("  Low Stock: /tmp/low_stock_updates_log.txt")
-    
-    return "Test completed successfully"
+# Single Mutation class containing all mutations
+class Mutation(graphene.ObjectType):
+    create_customer = CreateCustomer.Field()
+    update_low_stock_products = UpdateLowStockProducts.Field()
+
+
+# Schema definition
+schema = graphene.Schema(query=Query, mutation=Mutation)
