@@ -83,3 +83,15 @@ class CreateCustomer(graphene.Mutation):
 
 class Mutation(graphene.ObjectType):
     create_customer = CreateCustomer.Field()
+
+
+
+
+class Query(graphene.ObjectType):
+    hello = graphene.String(default_value="Hello from CRM!")
+    
+    def resolve_hello(self, info):
+        # You can customize this response
+        return "CRM GraphQL endpoint is healthy"
+    
+schema = graphene.Schema(query=Query)
