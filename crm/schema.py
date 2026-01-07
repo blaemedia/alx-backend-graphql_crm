@@ -1,5 +1,6 @@
 import graphene
 from graphene_django import DjangoObjectType
+from crm.models import Product
 from graphene_django.filter import DjangoFilterConnectionField
 from django.db.models import Q, F
 from datetime import datetime
