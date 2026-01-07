@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-import subprocess
 import json
 from django.conf import settings
 
@@ -23,123 +22,398 @@ def log_crm_heartbeat():
     
     # Optional: Query GraphQL hello field to verify endpoint
     try:
-        # Method 1: Try using the gql library if available
-        try:
-            from gql import gql, Client
-            from gql.transport.requests import RequestsHTTPTransport
-            
-            # Determine the GraphQL endpoint URL
-            # Try to get it from settings, or use a default
-            graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
-            
-            # Create a transport for the GraphQL endpoint
-            transport = RequestsHTTPTransport(
-                url=graphql_url,
-                verify=True,
-                retries=3,
-            )
-            
-            # Create a GraphQL client
-            client = Client(transport=transport, fetch_schema_from_transport=False)
-            
-            # Define the GraphQL query
-            query = gql("""
-                query {
-                    hello
-                }
-            """)
-            
-            # Execute the query
-            result = client.execute(query)
-            
-            # Append GraphQL status to log
-            with open(log_file_path, 'a') as f:
-                if 'hello' in result:
-                    f.write(f"{current_time} GraphQL endpoint responsive: {result['hello']}\n")
-                else:
-                    f.write(f"{current_time} GraphQL endpoint responded with unexpected format\n")
-            
-        except ImportError:
-            # gql library not installed, fall back to method 2
-            raise ImportError("gql library not available")
-            
-    except ImportError:
-        # Method 2: Fall back to using requests library
-        try:
-            import requests
-            
-            # Determine the GraphQL endpoint URL
-            graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
-            
-            # Prepare the GraphQL query
-            query = {
-                "query": "query { hello }"
-            }
-            
-            # Make the request
-            response = requests.post(
-                graphql_url,
-                json=query,
-                headers={'Content-Type': 'application/json'},
-                timeout=5  # 5 second timeout
-            )
-            
+        import requests
+        
+        # Determine the GraphQL endpoint URL
+        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
+        
+        # Prepare the GraphQL query
+        query = {
+            "query": "query { hello }"
+        }
+        
+        # Make the request with timeout
+        response = requests.post(
+            graphql_url,
+            json=query,
+            headers={'Content-Type': 'application/json'},
+            timeout=5  # 5 second timeout
+        )
+        
+        # Log the result
+        with open(log_file_path, 'a') as f:
             if response.status_code == 200:
                 result = response.json()
-                with open(log_file_path, 'a') as f:
-                    if 'data' in result and 'hello' in result['data']:
-                        f.write(f"{current_time} GraphQL endpoint responsive: {result['data']['hello']}\n")
-                    else:
-                        f.write(f"{current_time} GraphQL endpoint responded with: {result}\n")
+                if 'data' in result and 'hello' in result['data']:
+                    f.write(f"{current_time} GraphQL endpoint responsive: {result['data']['hello']}\n")
+                else:
+                    f.write(f"{current_time} GraphQL endpoint responded with unexpected format: {result}\n")
             else:
-                with open(log_file_path, 'a') as f:
-                    f.write(f"{current_time} GraphQL endpoint returned status: {response.status_code}\n")
-                    
-        except ImportError:
-            # requests library not installed, fall back to method 3
-            with open(log_file_path, 'a') as f:
-                f.write(f"{current_time} Note: Both gql and requests libraries not available for GraphQL check\n")
+                f.write(f"{current_time} GraphQL endpoint returned HTTP {response.status_code}\n")
                 
-        except Exception as e:
-            # Log any other errors during requests-based GraphQL check
-            with open(log_file_path, 'a') as f:
-                f.write(f"{current_time} GraphQL check failed (requests): {str(e)}\n")
-    
-    except Exception as e:
-        # Log any other errors during gql-based GraphQL check
+    except requests.exceptions.Timeout:
         with open(log_file_path, 'a') as f:
-            f.write(f"{current_time} GraphQL check failed (gql): {str(e)}\n")
+            f.write(f"{current_time} GraphQL endpoint timeout (5 seconds)\n")
+    except requests.exceptions.ConnectionError:
+        with open(log_file_path, 'a') as f:
+            f.write(f"{current_time} GraphQL endpoint connection failed\n")
+    except ImportError:
+        with open(log_file_path, 'a') as f:
+            f.write(f"{current_time} Note: requests library not installed for GraphQL check\n")
+    except Exception as e:
+        with open(log_file_path, 'a') as f:
+            f.write(f"{current_time} GraphQL check failed: {str(e)}\n")
     
     return "Heartbeat logged successfully"
 
-# Alternative implementation using Django's test framework (for completeness)
-def check_graphql_via_django_test():
+
+def update_low_stock():
     """
-    Alternative method to check GraphQL using Django's test client
-    This doesn't require external HTTP calls
+    Cron job that runs every 12 hours to update low-stock products.
+    Executes GraphQL mutation and logs the updates.
     """
+    
+    # Get current timestamp
+    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
+    log_file_path = "/tmp/low_stock_updates_log.txt"
+    
+    # Initialize log message
+    log_message = f"\n{'='*60}\n"
+    log_message += f"Low Stock Update - {current_time}\n"
+    log_message += f"{'='*60}\n"
+    
     try:
-        from django.test import Client as DjangoTestClient
+        import requests
         
-        client = DjangoTestClient()
+        # Get GraphQL endpoint URL
+        base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
+        graphql_url = f"{base_url}/graphql/"
         
-        # Query the GraphQL endpoint for the hello field
-        query = {
-            'query': 'query { hello }'
+        # GraphQL mutation to update low stock products
+        # Using the simple mutation without arguments for default behavior
+        mutation = """
+            mutation UpdateLowStock {
+                updateLowStockProducts {
+                    success
+                    message
+                    updatedCount
+                    timestamp
+                    updatedProducts {
+                        id
+                        name
+                        oldStock
+                        newStock
+                    }
+                }
+            }
+        """
+        
+        # Alternative: Mutation with custom parameters
+        # mutation = """
+        #     mutation UpdateLowStock {
+        #         updateLowStockProducts(threshold: 10, incrementBy: 10) {
+        #             success
+        #             message
+        #             updatedCount
+        #             timestamp
+        #             updatedProducts {
+        #                 id
+        #                 name
+        #                 oldStock
+        #                 newStock
+        #             }
+        #         }
+        #     }
+        # """
+        
+        # Make the GraphQL request
+        response = requests.post(
+            graphql_url,
+            json={'query': mutation},
+            headers={'Content-Type': 'application/json'},
+            timeout=30  # 30 second timeout for potentially many updates
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            if 'errors' in result:
+                # GraphQL errors
+                log_message += f"GraphQL Errors:\n"
+                for error in result['errors']:
+                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
+                    if 'locations' in error:
+                        loc = error['locations'][0]
+                        log_message += f"    at line {loc.get('line')}, column {loc.get('column')}\n"
+            else:
+                data = result.get('data', {}).get('updateLowStockProducts', {})
+                success = data.get('success', False)
+                message = data.get('message', 'No message returned')
+                updated_count = data.get('updatedCount', 0)
+                updated_products = data.get('updatedProducts', [])
+                timestamp = data.get('timestamp', 'Unknown time')
+                
+                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
+                log_message += f"Message: {message}\n"
+                log_message += f"Mutation Timestamp: {timestamp}\n"
+                log_message += f"Total Updated: {updated_count}\n\n"
+                
+                if updated_products:
+                    log_message += f"Updated Products:\n"
+                    log_message += f"{'-'*60}\n"
+                    
+                    for product in updated_products:
+                        product_name = product.get('name', 'Unknown Product')
+                        product_id = product.get('id', 'N/A')
+                        old_stock = product.get('oldStock', 'N/A')
+                        new_stock = product.get('newStock', 'N/A')
+                        
+                        log_message += f"  • {product_name} "
+                        log_message += f"(ID: {product_id}): "
+                        log_message += f"Stock {old_stock} → {new_stock} "
+                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
+                else:
+                    log_message += "No low-stock products were updated.\n"
+        else:
+            log_message += f"HTTP Error: {response.status_code}\n"
+            log_message += f"Response: {response.text[:500]}...\n"  # Truncate long responses
+    
+    except requests.exceptions.Timeout:
+        log_message += f"ERROR: Request timed out after 30 seconds\n"
+    except requests.exceptions.ConnectionError:
+        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
+        log_message += f"ERROR: Could not connect to GraphQL endpoint at {graphql_url}\n"
+    except ImportError:
+        log_message += f"ERROR: requests library not installed. Install with: pip install requests\n"
+    except Exception as e:
+        log_message += f"ERROR: {str(e)}\n"
+        import traceback
+        log_message += f"Traceback: {traceback.format_exc()}\n"
+    
+    # Add execution timestamp at the end
+    log_message += f"{'='*60}\n"
+    log_message += f"Execution completed at: {datetime.now().strftime('%d/%m/%Y-%H:%M:%S')}\n"
+    log_message += f"{'='*60}\n\n"
+    
+    # Append to log file
+    with open(log_file_path, 'a') as f:
+        f.write(log_message)
+    
+    return f"Low stock update completed at {current_time}"
+
+
+def update_low_stock_django():
+    """
+    Alternative version using Django's test client (no external HTTP needed).
+    This is more efficient as it doesn't require HTTP requests.
+    """
+    from datetime import datetime
+    from django.test import Client
+    
+    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
+    log_file_path = "/tmp/low_stock_updates_log.txt"
+    
+    # Initialize log
+    log_message = f"\n{'='*60}\n"
+    log_message += f"Low Stock Update (Django Client) - {current_time}\n"
+    log_message += f"{'='*60}\n"
+    
+    try:
+        client = Client()
+        
+        # GraphQL mutation
+        mutation = {
+            "query": """
+                mutation UpdateLowStock {
+                    updateLowStockProducts {
+                        success
+                        message
+                        updatedCount
+                        timestamp
+                        updatedProducts {
+                            id
+                            name
+                            oldStock
+                            newStock
+                        }
+                    }
+                }
+            """
         }
         
-        # Make a POST request to your GraphQL endpoint
+        # Make the request
         response = client.post(
             '/graphql/',
-            data=json.dumps(query),
+            data=json.dumps(mutation),
             content_type='application/json'
         )
         
         if response.status_code == 200:
             result = json.loads(response.content)
-            return result
+            
+            if 'errors' in result:
+                log_message += f"GraphQL Errors:\n"
+                for error in result['errors']:
+                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
+            else:
+                data = result.get('data', {}).get('updateLowStockProducts', {})
+                success = data.get('success', False)
+                message = data.get('message', 'No message returned')
+                updated_count = data.get('updatedCount', 0)
+                updated_products = data.get('updatedProducts', [])
+                
+                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
+                log_message += f"Message: {message}\n"
+                log_message += f"Total Updated: {updated_count}\n\n"
+                
+                if updated_products:
+                    log_message += f"Updated Products:\n"
+                    log_message += f"{'-'*60}\n"
+                    
+                    for product in updated_products:
+                        product_name = product.get('name', 'Unknown Product')
+                        product_id = product.get('id', 'N/A')
+                        old_stock = product.get('oldStock', 'N/A')
+                        new_stock = product.get('newStock', 'N/A')
+                        
+                        log_message += f"  • {product_name} "
+                        log_message += f"(ID: {product_id}): "
+                        log_message += f"Stock {old_stock} → {new_stock} "
+                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
+                else:
+                    log_message += "No low-stock products were updated.\n"
         else:
-            return {"error": f"HTTP {response.status_code}"}
+            log_message += f"HTTP Error: {response.status_code}\n"
+            try:
+                log_message += f"Response: {response.content.decode()}\n"
+            except:
+                log_message += f"Response: {response.content}\n"
             
     except Exception as e:
-        return {"error": str(e)}
+        log_message += f"ERROR: {str(e)}\n"
+        import traceback
+        log_message += f"Traceback: {traceback.format_exc()}\n"
+    
+    # Add execution timestamp at the end
+    log_message += f"{'='*60}\n"
+    log_message += f"Execution completed at: {datetime.now().strftime('%d/%m/%Y-%H:%M:%S')}\n"
+    log_message += f"{'='*60}\n\n"
+    
+    # Append to log file
+    with open(log_file_path, 'a') as f:
+        f.write(log_message)
+    
+    return f"Low stock update completed at {current_time}"
+
+
+def test_low_stock_dry_run():
+    """
+    Test function to simulate low stock update without actually updating.
+    Useful for debugging and testing.
+    """
+    from datetime import datetime
+    import requests
+    
+    current_time = datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
+    log_file_path = "/tmp/low_stock_test_log.txt"
+    
+    log_message = f"\n{'='*60}\n"
+    log_message += f"Low Stock DRY RUN Test - {current_time}\n"
+    log_message += f"{'='*60}\n"
+    
+    try:
+        graphql_url = getattr(settings, 'GRAPHQL_URL', 'http://localhost:8000/graphql/')
+        
+        # Mutation with dryRun parameter set to true
+        mutation = {
+            "query": """
+                mutation UpdateLowStock {
+                    updateLowStockProducts(dryRun: true) {
+                        success
+                        message
+                        updatedCount
+                        timestamp
+                        updatedProducts {
+                            id
+                            name
+                            oldStock
+                            newStock
+                        }
+                    }
+                }
+            """
+        }
+        
+        response = requests.post(
+            graphql_url,
+            json=mutation,
+            headers={'Content-Type': 'application/json'},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            log_message += f"DRY RUN - No actual updates were made\n\n"
+            
+            if 'errors' in result:
+                log_message += f"GraphQL Errors:\n"
+                for error in result['errors']:
+                    log_message += f"  - {error.get('message', 'Unknown error')}\n"
+            else:
+                data = result.get('data', {}).get('updateLowStockProducts', {})
+                success = data.get('success', False)
+                message = data.get('message', 'No message returned')
+                updated_count = data.get('updatedCount', 0)
+                updated_products = data.get('updatedProducts', [])
+                
+                log_message += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
+                log_message += f"Message: {message}\n"
+                log_message += f"Would update: {updated_count} products\n\n"
+                
+                if updated_products:
+                    log_message += f"Products that would be updated:\n"
+                    log_message += f"{'-'*60}\n"
+                    
+                    for product in updated_products:
+                        product_name = product.get('name', 'Unknown Product')
+                        product_id = product.get('id', 'N/A')
+                        old_stock = product.get('oldStock', 'N/A')
+                        new_stock = product.get('newStock', 'N/A')
+                        
+                        log_message += f"  • {product_name} "
+                        log_message += f"(ID: {product_id}): "
+                        log_message += f"Stock {old_stock} → {new_stock} "
+                        log_message += f"(+{new_stock - old_stock if isinstance(new_stock, int) and isinstance(old_stock, int) else 'N/A'})\n"
+                else:
+                    log_message += "No low-stock products found.\n"
+        else:
+            log_message += f"HTTP Error: {response.status_code}\n"
+            log_message += f"Response: {response.text[:500]}...\n"
+    
+    except Exception as e:
+        log_message += f"ERROR: {str(e)}\n"
+    
+    # Append to log file
+    with open(log_file_path, 'a') as f:
+        f.write(log_message)
+    
+    print(f"Dry run test completed. Check {log_file_path} for results.")
+    return "Dry run test completed"
+
+
+# Quick test function
+def test_cron_functions():
+    """Test both cron functions and print results."""
+    print("Testing CRM Heartbeat...")
+    result1 = log_crm_heartbeat()
+    print(f"Heartbeat: {result1}")
+    
+    print("\nTesting Low Stock Update (Django Client)...")
+    result2 = update_low_stock_django()
+    print(f"Low Stock Update: {result2}")
+    
+    print("\nCheck log files:")
+    print("  Heartbeat: /tmp/crm_heartbeat_log.txt")
+    print("  Low Stock: /tmp/low_stock_updates_log.txt")
+    
+    return "Test completed successfully"
